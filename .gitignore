@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+*.sqlite3
+*.log
+*.env
+.env
+venv/
+node_modules/
+*.zip
+*.mp4
+.idea/
+.DS_Store
+*.tgz
+*.egg-info/
+staticfiles/
+db.sqlite3
+*.pem
