@@ -11,7 +11,7 @@ const captures = [
   {
     // Lumbar Side Flexion (Left)
     instruction:
-      "Stand upright, hands by your side. Keeping your back straight and knees locked, slide your LEFT hand down your leg as far as comfortable and hold briefly.",
+      "Stand upright, hands by their side, leaving a slight gap. Keeping their back straight and knees locked, slide their LEFT hand down their leg as far as comfortable and hold briefly.",
     provideFeedback: true,
     requiredKeypoints: [
       "left_shoulder",
@@ -40,7 +40,7 @@ const captures = [
   {
     // Intermalleolar Distance (Attempt 1)
     instruction:
-      "Stand upright with your feet close together. Keeping your legs straight and knees not bent, slowly move your feet apart sideways as far as possible. Hold briefly.",
+      "Stand upright with their feet close together. Keeping their legs straight and knees not bent, slowly move their feet apart sideways as far as possible. Hold briefly.",
     provideFeedback: true,
     requiredKeypoints: [
       "nose",
@@ -69,7 +69,7 @@ const captures = [
   {
     // Cervical Rotation (Left)
     instruction:
-      "Stand upright. Slowly turn your head as far as possible to the LEFT without moving your shoulders. Hold briefly.",
+      "Stand upright. Slowly turn their head as far as possible to the LEFT without moving their shoulders. Hold briefly.",
     provideFeedback: true,
     requiredKeypoints: [
       "nose",
@@ -81,7 +81,7 @@ const captures = [
   },
   {
     // Cervical Rotation (Right)
-    instruction: "Repeat, turning your head to the RIGHT.",
+    instruction: "Repeat, turning their head to the RIGHT.",
     provideFeedback: true,
     requiredKeypoints: [
       "nose",
@@ -94,7 +94,7 @@ const captures = [
   {
     // Tragus-to-Wall (Left)
     instruction:
-      "Position the camera to their LEFT side. Stand with your back against the wall (ensuring your heels, hips, and shoulders touch the wall). Slowly pull your head back towards the wall without tilting up or down. Hold briefly.",
+      "Position the camera to their LEFT side. Stand with their back against the wall (ensuring their heels, hips, and shoulders touch the wall). Slowly pull their head back towards the wall without tilting up or down. Hold briefly.",
     provideFeedback: true,
     requiredKeypoints: ["left_ear", "left_shoulder"],
   },
