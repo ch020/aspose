@@ -1,4 +1,24 @@
-ZIP_INPUT_DIR = "C:/Users/Matthew Chapman/Documents/CS UNI/Year 4/Diss/Data/Zips/"
-EXTRACTION_OUTPUT_DIR = "C:/Users/Matthew Chapman/Documents/CS UNI/Year 4/Diss/Data/Extracted/"
+from pathlib import Path
 
-SMOOTHING = False
+# IO PATHS
+ZIP_INPUT_DIR = Path(r"Zip")
+EXTRACTED_OUTPUT_DIR = Path(r"Extracted")
+RESULTS_CSV = Path(r"results.csv")
+
+# RUNTIME OPTIONS
+POSE_BACKENDS = {
+    "cr": ["blazepose"],
+    "lsf": ["blazepose", "hrnet", "openpose"],
+    "imd": ["blazepose", "hrnet", "openpose"],
+    "ttw": ["blazepose"],
+}
+SMOOTHING = True
+
+SG_WINDOW_LENGTH = 9  # must be odd
+SG_POLY_ORDER = 2
+OUTLIER_ZSCORE = 3.0
+
+assert SG_WINDOW_LENGTH % 2 == 1, "SG_WINDOW_LENGTH must be odd."
+
+# WEIGHTS
+WEIGHTS_DIR = Path(r"weights")

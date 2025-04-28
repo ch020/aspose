@@ -129,4 +129,4 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 CORS_ALLOW_ALL_ORIGINS = True
 
-ZIP_SAVE_DIRECTORY = r"C:/Users/Matthew Chapman/Documents/CS UNI/Year 4/Diss/Data/Zips/"
+ZIP_SAVE_DIRECTORY = r"C:/Users/chapp/OneDrive/Documents/CS UNI/Year 4/Diss/Data/Zips/"

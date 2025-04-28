@@ -1,188 +1,250 @@
+import csv
+import importlib
 import json
-import os
 import zipfile
-from typing import Dict, Optional, List
+import time
+from pathlib import Path
+from statistics import mean
+from typing import Dict, List, Protocol
 
-import cv2
-import mediapipe as mp
+import numpy as np
 from scipy.signal import savgol_filter
+from scipy.stats import zscore
 
-from config import *
-from maths_helpers import *
-
-mp_pose = mp.solutions.pose
-
-def extract_all_zips(zip_dir: str = ZIP_INPUT_DIR, output_dir: str = EXTRACTION_OUTPUT_DIR) -> Dict[str, Optional[Dict]]:
-    os.makedirs(output_dir, exist_ok=True)
-    all_data = {}
-
-    for filename in os.listdir(zip_dir):
-        if filename.endswith(".zip"):
-            zip_path = os.path.join(zip_dir, filename)
-            participant_id = os.path.splitext(filename)[0]
-            participant_dir = os.path.join(output_dir, participant_id)
-            os.makedirs(participant_dir, exist_ok=True)
-
-            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-                zip_ref.extractall(participant_dir)
-            print(f"Extracted {filename} to {participant_dir}")
-
-            metadata_path = os.path.join(participant_dir, "metadata.json")
-            metadata = None
-            if os.path.exists(metadata_path):
-                with open(metadata_path, "r") as f:
-                    metadata = json.load(f)
-                print(f"Loaded metadata for {participant_id}: {metadata}")
-            else:
-                print(f"No metadata for {participant_id}")
-
-            video_files = sorted(
-                [f for f in os.listdir(participant_dir) if f.endswith(".mp4")],
-                key=lambda x: int(os.path.splitext(x)[0])
-            )
-            video_paths = [os.path.join(participant_dir, f) for f in video_files]
-
-            all_data[participant_id] = {
-                "metadata": metadata,
-                "video_paths": video_paths
-            }
-
-    return all_data
-
-def read_video_frames(video_path: str) -> List[np.ndarray]:
-    frames = []
-    cap = cv2.VideoCapture(video_path)
-
-    if not cap.isOpened():
-        raise IOError(f"Cannot open video {video_path}")
-
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
-        frames.append(frame)
-
-    cap.release()
-    return frames
-
-def extract_keypoints_from_frames_blazepose(frames: List[np.ndarray]) -> List[Dict[str, np.ndarray]]:
-    keypoints_list = []
-
-    with mp_pose.Pose(
-        static_image_mode=False,
-        model_complexity=2,
-        enable_segmentation=False,
-        smooth_landmarks=True,
-        min_detection_confidence=0.5,
-        min_tracking_confidence=0.5
-    ) as pose:
-
-        for frame in frames:
-            image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            results = pose.process(image)
-
-            if results.pose_landmarks:
-                keypoints = {
-                    landmark.name: np.array([
-                        landmark.x,
-                        landmark.y,
-                        landmark.z
-                    ])
-                    for landmark in mp_pose.PoseLandmark
-                }
-                keypoints_list.append(keypoints)
-            else:
-                keypoints_list.append(None)
-
-    return keypoints_list
-
-def normalised_to_cm(value: float, user_height_cm: float, user_height_px:float) -> float:
-    scale_factor = user_height_cm / user_height_px
-    return value * scale_factor
-
-def smooth_keypoints(keypoints_series: np.ndarray, window: int = 5, polyorder: int = 2) -> np.ndarray:
-    return savgol_filter(keypoints_series, window_length=window, polyorder=polyorder, axis=0)
-
-def compute_cervical_rotation_3d(keypoints_series: List[Dict[str, np.ndarray]]) -> float:
-    angles = []
-
-    for keypoints in keypoints_series:
-        if keypoints:
-            nose = keypoints["nose"]
-            left_shoulder = keypoints["left_shoulder"]
-            right_shoulder = keypoints["right_shoulder"]
-
-            torso_centre = (left_shoulder + right_shoulder) / 2
-
-            head_vector = nose - torso_centre
-            head_yaw = np.degrees(np.arctan2(head_vector[0], head_vector[2]))
-            angles.append(head_yaw)
-
-    angles = np.array(angles)
-
-    if SMOOTHING:
-        angles = smooth_keypoints(angles)
-
-    max_rotation = np.abs(np.max(angles) - np.min(angles))
-    return max_rotation
+import config as C
+from maths_helpers import bucket, _B_TRAGUS, _B_LSF, _B_IMD, _B_CR, yaw
 
 
-def lateral_spinal_flexion(keypoints_series: List[Dict[str, np.ndarray]],user_height_cm: float, user_height_px: float, side: str = "left") -> float:
-    distances = []
+# IO Helpers
+def extract_all() -> Dict[str, Dict]:
+    recs: Dict[str, Dict] = {}
+    C.EXTRACTED_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    for zf in C.ZIP_INPUT_DIR.glob("*.zip"):
+        try:
+            pid = zf.stem
+            dest = C.EXTRACTED_OUTPUT_DIR / pid
+            if not dest.exists():
+                with zipfile.ZipFile(zf) as z:
+                    z.extractall(dest)
+            meta = json.loads((dest / "metadata.json").read_text())
+            vids = sorted(dest.glob("*.mp4"), key=lambda p: int(p.stem))
+            recs[pid] = {"meta": meta, "vids": vids}
+        except Exception as e:
+            print(f"[Warning] Skipped {zf.name} due to error: {e}")
+    return recs
 
-    for keypoints in keypoints_series:
-        if keypoints:
-            wrist = keypoints[f'{side}_wrist'][:2]
-            knee = keypoints[f'{side}_knee'][:2]
+# Backend Loader
+class PoseBackend(Protocol):
+    name: str
+    def infer(self, video_path: Path) -> List[Dict[str, np.ndarray]]: ...
 
-            distance_px = np.linalg.norm(wrist - knee)
-            distances.append(distance_px)
+def load_backend(tag: str) -> PoseBackend:
+    return importlib.import_module(f"analysis.pose_backends.{tag}").Backend()
 
-    distances = np.array(distances)
-    if SMOOTHING:
-        distances = smooth_keypoints(distances)
-    min_distance_px = np.min(distances)
+BACKENDS: dict[str, PoseBackend] = {}
+for tag in {b for lst in C.POSE_BACKENDS.values() for b in lst}:
+    BACKENDS[tag] = load_backend(tag)
 
-    distance_cm = normalised_to_cm(min_distance_px, user_height_cm, user_height_px)
-    return distance_cm
+# Cleaning
+def smooth(arr: np.ndarray) -> np.ndarray:
+    arr = arr[~np.isnan(arr)]
+    if C.SMOOTHING and len(arr) >= C.SG_WINDOW_LENGTH:
+        return savgol_filter(
+            arr,
+            C.SG_WINDOW_LENGTH,
+            C.SG_POLY_ORDER,
+            axis=0
+        )
+    return arr
 
-def tragus_to_wall(keypoints_series: List[Dict[str, np.ndarray]],user_height_cm: float, user_height_px: float, side: str = "left"):
-    distances = []
+def no_outliers(arr: np.ndarray) -> np.ndarray:
+    if arr.size < 3:
+        return arr
+    mask = np.abs(zscore(arr, nan_policy="omit")) < C.OUTLIER_ZSCORE
+    return arr[mask]
 
-    for keypoints in keypoints_series:
-        if keypoints:
-            ear = keypoints[f'{side}_ear'][:2]
-            shoulder = keypoints[f'{side}_shoulder'][:2]
+# Metrics
+def px2cm(px: float, h_px: float, h_cm: float) -> float:
+    return px * (h_cm / h_px)
 
-            distance_px = np.abs(ear[0] - shoulder[0])
-            distances.append(distance_px)
 
-    distances = np.array(distances)
-    if SMOOTHING:
-        distances = smooth_keypoints(distances)
-    min_distance_px = np.min(distances)
+def _compute_shoulder_ear_cm(track: list[dict[str, np.ndarray]],
+                             h_px: float,
+                             h_cm: float,
+                             side: str = "left") -> float:
+    dists_px = []
+    for frame in track:
+        if frame and f"{side}_ear" in frame and f"{side}_shoulder" in frame:
+            dists_px.append(abs(frame[f"{side}_ear"][1] - frame[f"{side}_shoulder"][1]))
+    if not dists_px:
+        return np.nan
+    avg_dist_px = np.mean(dists_px)
+    shoulder_ear_cm = px2cm(avg_dist_px, h_px, h_cm)
+    return shoulder_ear_cm
 
-    distance_cm = normalised_to_cm(min_distance_px, user_height_cm, user_height_px)
-    return distance_cm
+def _ttw(track: list[dict[str, np.ndarray]],
+         shoulder_ear_cm: float,
+         side: str = "left") -> float:
+    tragus_dists = []
+    shoulder_ear_dists_px = []
 
-def intermalleolar_distance(keypoints_series: List[Dict[str, np.ndarray]],user_height_cm: float, user_height_px: float):
-    distances = []
+    for frame in track:
+        if frame and f"{side}_ear" in frame and f"{side}_shoulder" in frame:
+            shoulder_ear_px = abs(frame[f"{side}_ear"][1] - frame[f"{side}_shoulder"][1])
+            tragus_z_diff = abs(frame[f"{side}_ear"][2] - frame[f"{side}_shoulder"][2])
+            shoulder_ear_dists_px.append(shoulder_ear_px)
+            tragus_dists.append(tragus_z_diff)
 
-    for keypoints in keypoints_series:
-        if keypoints:
-            left_ankle = keypoints[f'left_ankle'][:2]
-            right_ankle = keypoints[f'right_ankle'][:2]
+    if not tragus_dists or not shoulder_ear_dists_px:
+        return np.nan
 
-            distance_px = np.abs(left_ankle - right_ankle)
-            distances.append(distance_px)
+    tragus_z_diff_px = np.min(no_outliers(np.asarray(tragus_dists)))
+    shoulder_ear_px_side = np.mean(shoulder_ear_dists_px)
 
-    distances = np.array(distances)
-    if SMOOTHING:
-        distances = smooth_keypoints(distances)
-    max_distance_px = np.max(distances)
+    return px2cm(tragus_z_diff_px, shoulder_ear_px_side, shoulder_ear_cm)
 
-    distance_cm = normalised_to_cm(max_distance_px, user_height_cm, user_height_px)
-    return distance_cm
+def _cr(track: list[dict[str, np.ndarray]]) -> float:
+    yaws = []
+    for k in track:
+        if k and "nose" in k and "left_shoulder" in k and "right_shoulder" in k:
+            nose = k["nose"]
+            torso = (k["left_shoulder"] + k["right_shoulder"]) / 2
+            yaws.append(yaw(torso, nose))
+    if not yaws:
+        return np.nan
+    arr = smooth(np.asarray(yaws))
+    return arr.max() - arr.min()
+
+def _lsf(track: list[dict[str, np.ndarray]],
+         h_px: float,
+         h_cm: float,
+         side: str = "left") -> float:
+    d = [
+        abs(k[f"{side}_wrist"][1] - k[f"{side}_ankle"][1])
+        for k in track if k and f"{side}_wrist" in k and f"{side}_ankle" in k
+    ]
+    if not d:
+        return np.nan
+    arr = no_outliers(np.asarray(d))
+    return px2cm(arr.max() - arr.min(), h_px, h_cm)
+
+def _imd(track: list[dict[str, np.ndarray]],
+         h_px: float,
+         h_cm: float) -> float:
+    d = [
+        abs(k.get("left_ankle", np.array([np.nan, np.nan, np.nan]))[0] -
+            k.get("right_ankle", np.array([np.nan, np.nan, np.nan]))[0])
+        for k in track if k
+    ]
+    if not d:
+        return np.nan
+    return px2cm(max(no_outliers(np.asarray(d))), h_px, h_cm)
+
+# PROCESSING
+def _standing_height_px(track: list[dict[str, np.ndarray]]) -> float:
+    spans = [
+        abs(k["nose"][1] - k.get("mid_ankle", (k.get("left_ankle") + k.get("right_ankle")) / 2)[1])
+        for k in track if k and "nose" in k and ("mid_ankle" in k or ("left_ankle" in k and "right_ankle" in k))
+    ]
+    if not spans:
+        return np.nan
+    return float(max(spans))
+
+def _metric_for(video: Path, backend: PoseBackend) -> list[dict[str, np.ndarray]]:
+    return backend.infer(video)
+
+def _process_attempts(video_pair: list[Path],
+                      func,
+                      h_px: float, h_cm: float,
+                      **kw) -> tuple[float, float]:
+    t1 = func(_metric_for(video_pair[0], kw["be"]), h_px, h_cm, kw.get("side", "left"))
+    t2 = func(_metric_for(video_pair[1], kw["be"]), h_px, h_cm, kw.get("side", "right"))
+    return t1, t2
+
+def safe_average(a: float, b: float) -> float:
+    valid = [v for v in [a, b] if not np.isnan(v)]
+    if not valid:
+        return np.nan
+    return mean(valid)
+
+def process_participant(pid: str, rec: dict) -> list:
+    videos: list[Path] = rec["videos"]
+
+    rows = []
+    for metric, backend_list in C.POSE_BACKENDS.items():
+        be = BACKENDS[backend_list[0]]
+        if metric == "cr":
+            stand_track = be.infer(videos[0])
+        else:
+            stand_track = BACKENDS[next(iter(BACKENDS))].infer(videos[0])
+
+        h_px = _standing_height_px(stand_track)
+        h_cm = rec["meta"].get("height", 170.0)
+
+        shoulder_ear_cm_left = _compute_shoulder_ear_cm(stand_track, h_px, h_cm, "left")
+        shoulder_ear_cm_right = _compute_shoulder_ear_cm(stand_track, h_px, h_cm, "right")
+
+        inf = {}
+        times = []
+
+        for b in backend_list:
+            backend = BACKENDS[b]
+            for v in videos:
+                start = time.perf_counter()
+                result = backend.infer(v)
+                end = time.perf_counter()
+                times.append(end - start)
+                inf[v] = result
+
+        avg_runtime = np.mean(times) if times else np.nan
+
+        def gv(ix): return inf[videos[ix]]
+
+        cr_L = _cr(gv(2))
+        cr_R = _cr(gv(3))
+
+        imd_L = _imd(gv(4), h_px, h_cm)
+        imd_R = _imd(gv(5), h_px, h_cm)
+
+        lsf_L = _lsf(gv(0), h_px, h_cm, "left")
+        lsf_R = _lsf(gv(1), h_px, h_cm, "right")
+
+        ttw_L = _ttw(gv(6), shoulder_ear_cm_left, "left")
+        ttw_R = _ttw(gv(7), shoulder_ear_cm_right, "right")
+
+        scr_cr = bucket(safe_average(cr_L, cr_R), *_B_CR)
+        scr_imd = bucket(safe_average(imd_L, imd_R), *_B_IMD)
+        scr_lsf = bucket(safe_average(lsf_L, lsf_R), *_B_LSF)
+        scr_ttw = bucket(safe_average(ttw_L, ttw_R), *_B_TRAGUS)
+
+        row = [pid, be.name] + [v if not np.isnan(v) else "NA" for v in [
+            cr_L, cr_R, imd_L, imd_R, lsf_L, lsf_R, ttw_L, ttw_R,
+            scr_cr, scr_imd, scr_lsf, scr_ttw,
+            avg_runtime,
+        ]]
+        rows.append(row)
+    return rows
+
+def main() -> None:
+    participants = extract_all()
+    C.RESULTS_CSV.parent.mkdir(exist_ok=True)
+
+    header = [
+        "participant", "backend",
+        "cr_left", "cr_right",
+        "imd_left", "imd_right",
+        "lsf_left", "lsf_right",
+        "ttw_left", "ttw_right",
+        "cr_score", "imd_score", "lsf_score", "ttw_score",
+        "avg_runtime_sec"
+    ]
+
+    with C.RESULTS_CSV.open("w", newline="") as f:
+        wr = csv.writer(f)
+        wr.writerow(header)
+        for pid, rec in participants.items():
+            for row in process_participant(pid, rec):
+                wr.writerow(row)
 
 if __name__ == "__main__":
-    metadata_dict = extract_all_zips()  # Extract data zips
+    main()
