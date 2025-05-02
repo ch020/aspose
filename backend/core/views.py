@@ -9,7 +9,7 @@ from .models import Participant
 from .upload_handlers import PrintProgressUploadHandler
 
 
-# Create your views here.
+# Login View
 @api_view(['POST'])
 def login(request):
     identifier = request.data.get('identifier')
@@ -23,6 +23,7 @@ def login(request):
     except Participant.DoesNotExist:
         return Response({"success": False}, status=404)
 
+# Upload Zip Handler
 @api_view(['POST'])
 def upload_zip(request):
     request.upload_handlers.insert(0, PrintProgressUploadHandler(request))
