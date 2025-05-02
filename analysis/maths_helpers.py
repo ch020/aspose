@@ -12,10 +12,13 @@ def yaw(v1: np.ndarray, v2: np.ndarray) -> float:
     v1xz, v2xz = v1[[0, 2]], v2[[0, 2]]
     v1xz /= max(np.linalg.norm(v1xz), 1e-8)
     v2xz /= max(np.linalg.norm(v2xz), 1e-8)
-    return np.degrees(np.arccos(np.clip(v1xz @ v2xz, -1.0, 1.0)))
+    return np.degrees(np.arccos(np.clip(np.dot(v1xz, v2xz), -1.0, 1.0)))
 
 def bucket(value: float, *bins: Tuple[float, float, A]) -> A:
     """Return the label for the interval containing value."""
+    if np.isnan(value):
+        return np.nan
+    value = round(value, 1)
     for lo, hi, label in bins:
         if lo <= value <= hi:
             return label
